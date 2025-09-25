@@ -1,0 +1,71 @@
+# app.R
+library(shiny)
+library(Metrics)
+library(ggplot2)
+
+ui <- fluidPage(
+  
+  titlePanel("Kroger Retail Data Quality Report"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("file", "Upload Retail CSV", accept = ".csv"),
+      actionButton("run", "Run Analysis")
+    ),
+    
+    mainPanel(
+      h3("Error Metrics"),
+      verbatimTextOutput("metrics"),
+      h3("Residual Plot (Actual - Predicted)"),
+      plotOutput("residualPlot"),
+      h3("Actual vs Predicted Scatterplot"),
+      plotOutput("scatterPlot")
+    )
+  )
+)
+
+server <- function(input, output) {
+  
+  data <- eventReactive(input$run, {
+    req(input$file)
+    df <- read.csv(input$file$datapath)
+    
+    # Compute predicted movement
+    df$Predicted_Movement <- df$Scanned.. / df$AVG_RETAIL
+    
+    # Calculate error metrics
+    mae_value <- mae(df$SCANNED_MOVEMENT, df$Predicted_Movement)
+    mape_value <- mape(df$SCANNED_MOVEMENT, df$Predicted_Movement) * 100
+    
+    list(df = df, mae = mae_value, mape = mape_value)
+  })
+  
+  output$metrics <- renderPrint({
+    req(data())
+    cat("Mean Absolute Error (MAE):", data()$mae, "\n")
+    cat("Mean Absolute Percentage Error (MAPE):", data()$mape, "%\n")
+  })
+  
+  output$residualPlot <- renderPlot({
+    req(data())
+    df <- data()$df
+    df$Residuals <- df$SCANNED_MOVEMENT - df$Predicted_Movement
+    ggplot(df, aes(x = SCANNED_MOVEMENT, y = Residuals)) +
+      geom_point(color = "blue", alpha = 0.6) +
+      geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+      labs(x = "Actual Movement", y = "Residuals",
+           title = "Residual Plot")
+  })
+  
+  output$scatterPlot <- renderPlot({
+    req(data())
+    df <- data()$df
+    ggplot(df, aes(x = SCANNED_MOVEMENT, y = Predicted_Movement)) +
+      geom_point(color = "darkgreen", alpha = 0.6) +
+      geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+      labs(x = "Actual Movement", y = "Predicted Movement",
+           title = "Actual vs Predicted")
+  })
+}
+
+shinyApp(ui = ui, server = server)
