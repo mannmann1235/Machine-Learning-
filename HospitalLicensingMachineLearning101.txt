@@ -1,0 +1,440 @@
+library(shiny)
+library(dbscan)
+library(isotree)
+library(DT)
+library(ggplot2)
+library(plotly)
+
+ui <- fluidPage(
+  tags$head(
+    tags$style(HTML("
+      .content-wrapper { margin: 20px; }
+      .metric-box { 
+        background: #f8f9fa; 
+        border: 1px solid #dee2e6; 
+        border-radius: 8px; 
+        padding: 15px; 
+        margin: 10px 0; 
+      }
+      .improvement-note {
+        background: #d1ecf1;
+        border: 1px solid #bee5eb;
+        border-radius: 4px;
+        padding: 10px;
+        margin: 10px 0;
+      }
+    "))
+  ),
+  
+  titlePanel(
+    div(
+      h2("Hospital Licensing Quality Assessment Dashboard", 
+         style = "color: #2c3e50; font-weight: 600;"),
+      p("Identifying opportunities for operational excellence and patient care enhancement",
+        style = "color: #6c757d; font-size: 16px;")
+    )
+  ),
+  
+  sidebarLayout(
+    sidebarPanel(
+      div(class = "content-wrapper",
+        h4("Analysis Parameters", style = "color: #495057;"),
+        
+        div(class = "metric-box",
+          h5("Clustering Analysis", style = "color: #28a745;"),
+          numericInput("eps", "Sensitivity (eps):", 
+                      value = 0.5, step = 0.1, min = 0.1, max = 2.0),
+          numericInput("minPts", "Minimum Group Size:", 
+                      value = 5, min = 2, max = 20),
+          helpText("Lower values = more sensitive detection")
+        ),
+        
+        div(class = "metric-box",
+          h5("Statistical Outlier Analysis", style = "color: #17a2b8;"),
+          sliderInput("iforest_cut", "Detection Threshold (Percentile):",
+                     min = 0.85, max = 0.99, value = 0.95, step = 0.01),
+          helpText("Higher values = more conservative detection")
+        ),
+        
+        actionButton("run", "Generate Assessment", 
+                    class = "btn-primary btn-lg",
+                    style = "width: 100%; margin: 20px 0;"),
+        
+        hr(),
+        
+        div(class = "improvement-note",
+          strong("Purpose:"), br(),
+          "This analysis identifies facilities with unique operational patterns that may benefit from:",
+          tags$ul(
+            tags$li("Process optimization review"),
+            tags$li("Best practice sharing"),
+            tags$li("Resource allocation assessment"),
+            tags$li("Quality improvement initiatives")
+          )
+        ),
+        
+        br(),
+        downloadButton("download", "Export Assessment Results", 
+                      class = "btn-success",
+                      style = "width: 100%;")
+      )
+    ),
+    
+    mainPanel(
+      div(class = "content-wrapper",
+        tabsetPanel(
+          tabPanel("Executive Summary", 
+                   br(),
+                   div(class = "metric-box",
+                     h4("Assessment Overview", style = "color: #2c3e50;"),
+                     verbatimTextOutput("summary")
+                   ),
+                   div(class = "metric-box",
+                     h4("Key Insights", style = "color: #2c3e50;"),
+                     verbatimTextOutput("insights")
+                   ),
+                   div(class = "improvement-note",
+                     h5("Recommendations", style = "color: #28a745;"),
+                     htmlOutput("recommendations")
+                   )
+          ),
+          
+          tabPanel("Operational Patterns", 
+                   br(),
+                   div(class = "metric-box",
+                     h4("Length of Stay Analysis", style = "color: #2c3e50;"),
+                     p("Facilities with distinctive patterns may benefit from operational review."),
+                     plotlyOutput("dbscanPlot", height = "500px")
+                   )
+          ),
+          
+          tabPanel("Statistical Analysis", 
+                   br(),
+                   div(class = "metric-box",
+                     h4("Operational Variation Assessment", style = "color: #2c3e50;"),
+                     p("Distribution of operational efficiency scores across all facilities."),
+                     plotlyOutput("iforestHist", height = "400px")
+                   ),
+                   div(class = "metric-box",
+                     h4("Performance Metrics Correlation", style = "color: #2c3e50;"),
+                     plotlyOutput("correlationPlot", height = "400px")
+                   )
+          ),
+          
+          tabPanel("Detailed Assessment", 
+                   br(),
+                   div(class = "metric-box",
+                     h4("Facility-Level Assessment Results", style = "color: #2c3e50;"),
+                     p("Comprehensive view of all facilities with assessment flags for improvement opportunities."),
+                     DTOutput("dataTable")
+                   )
+          )
+        )
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  # Reactive dataset
+  analysis_data <- reactiveVal()
+  
+  observeEvent(input$run, {
+    # Simulate or use actual HospitalLicensing101 data
+    # For demo purposes, creating sample data structure
+    if (!exists("HospitalLicensing101")) {
+      # Create sample data for demonstration
+      set.seed(42)
+      n <- 500
+      HospitalLicensing101 <- data.frame(
+        Facility_ID = paste0("FAC_", sprintf("%04d", 1:n)),
+        Facility_Name = paste("Healthcare Center", 1:n),
+        Estimated_LOS = rnorm(n, 4.5, 1.2),
+        Predicted_LOS = rnorm(n, 4.3, 1.1),
+        LOS_MachineLearningResidual = rnorm(n, 0, 0.8),
+        LOS_VariabilityDeviation = rnorm(n, 0, 0.6),
+        stringsAsFactors = FALSE
+      )
+      # Add some intentional outliers for demonstration
+      outlier_indices <- sample(1:n, 25)
+      HospitalLicensing101$Estimated_LOS[outlier_indices] <- 
+        HospitalLicensing101$Estimated_LOS[outlier_indices] + rnorm(25, 3, 1)
+    }
+    
+    # Prepare analysis dataset
+    analysis_df <- HospitalLicensing101
+    
+    # Step 1: Select and prepare features
+    features <- analysis_df[, c("Estimated_LOS", "Predicted_LOS",
+                               "LOS_MachineLearningResidual",
+                               "LOS_VariabilityDeviation")]
+    
+    # Handle missing values
+    complete_cases <- complete.cases(features)
+    features_clean <- features[complete_cases, ]
+    analysis_df_clean <- analysis_df[complete_cases, ]
+    
+    # Scale features for analysis
+    scaled_features <- scale(features_clean)
+    
+    # Step 2: DBSCAN Clustering Analysis
+    set.seed(123)
+    db_result <- dbscan(scaled_features, eps = input$eps, minPts = input$minPts)
+    
+    # Step 3: Isolation Forest Analysis
+    iso_model <- isolation.forest(scaled_features, ntrees = 100, sample_size = min(256, nrow(scaled_features)), seed = 123)
+    iso_scores <- predict(iso_model, scaled_features)
+    threshold <- quantile(iso_scores, input$iforest_cut, na.rm = TRUE)
+    
+    # Add results to dataset
+    analysis_df_clean$Cluster_Group <- db_result$cluster
+    analysis_df_clean$Pattern_Flag <- ifelse(db_result$cluster == 0, "Unique Pattern", "Standard Pattern")
+    analysis_df_clean$Efficiency_Score <- iso_scores
+    analysis_df_clean$Review_Priority <- ifelse(iso_scores >= threshold, "High", "Standard")
+    analysis_df_clean$Assessment_Notes <- ifelse(
+      iso_scores >= threshold, 
+      "Recommended for operational excellence review",
+      "Operating within expected parameters"
+    )
+    
+    # Store results
+    analysis_data(analysis_df_clean)
+  })
+  
+  # Executive Summary
+  output$summary <- renderPrint({
+    req(analysis_data())
+    data <- analysis_data()
+    
+    total_facilities <- nrow(data)
+    unique_patterns <- sum(data$Pattern_Flag == "Unique Pattern", na.rm = TRUE)
+    high_priority <- sum(data$Review_Priority == "High", na.rm = TRUE)
+    
+    cat("=== HOSPITAL LICENSING QUALITY ASSESSMENT ===\n\n")
+    cat("Total Facilities Assessed:", total_facilities, "\n")
+    cat("Facilities with Unique Operational Patterns:", unique_patterns, 
+        sprintf(" (%.1f%%)", 100 * unique_patterns / total_facilities), "\n")
+    cat("High Priority for Excellence Review:", high_priority,
+        sprintf(" (%.1f%%)", 100 * high_priority / total_facilities), "\n\n")
+    
+    cat("Average Estimated LOS:", sprintf("%.2f days", mean(data$Estimated_LOS, na.rm = TRUE)), "\n")
+    cat("Average Predicted LOS:", sprintf("%.2f days", mean(data$Predicted_LOS, na.rm = TRUE)), "\n")
+    cat("Operational Efficiency Range:", 
+        sprintf("%.3f to %.3f", min(data$Efficiency_Score, na.rm = TRUE), 
+                max(data$Efficiency_Score, na.rm = TRUE)), "\n")
+  })
+  
+  # Key Insights
+  output$insights <- renderPrint({
+    req(analysis_data())
+    data <- analysis_data()
+    
+    cat("=== KEY OPERATIONAL INSIGHTS ===\n\n")
+    
+    # Performance correlation
+    cor_est_pred <- cor(data$Estimated_LOS, data$Predicted_LOS, use = "complete.obs")
+    cat("LOS Prediction Accuracy Correlation:", sprintf("%.3f", cor_est_pred), "\n")
+    
+    if (cor_est_pred > 0.8) {
+      cat("→ Excellent predictive accuracy across facilities\n\n")
+    } else if (cor_est_pred > 0.6) {
+      cat("→ Good predictive accuracy with room for improvement\n\n")
+    } else {
+      cat("→ Opportunity to enhance LOS prediction models\n\n")
+    }
+    
+    # Variability insights
+    high_var_count <- sum(abs(data$LOS_VariabilityDeviation) > 1, na.rm = TRUE)
+    cat("Facilities with High LOS Variability:", high_var_count, "\n")
+    cat("→ These facilities may benefit from process standardization\n\n")
+    
+    # Efficiency distribution
+    cat("Operational Efficiency Distribution:\n")
+    cat("→ Top Quartile (Excellent):", sum(data$Efficiency_Score <= quantile(data$Efficiency_Score, 0.25, na.rm = TRUE), na.rm = TRUE), "facilities\n")
+    cat("→ Second Quartile (Good):", sum(data$Efficiency_Score > quantile(data$Efficiency_Score, 0.25, na.rm = TRUE) & 
+                                       data$Efficiency_Score <= quantile(data$Efficiency_Score, 0.5, na.rm = TRUE), na.rm = TRUE), "facilities\n")
+    cat("→ Third Quartile (Acceptable):", sum(data$Efficiency_Score > quantile(data$Efficiency_Score, 0.5, na.rm = TRUE) & 
+                                          data$Efficiency_Score <= quantile(data$Efficiency_Score, 0.75, na.rm = TRUE), na.rm = TRUE), "facilities\n")
+    cat("→ Fourth Quartile (Improvement Opportunity):", sum(data$Efficiency_Score > quantile(data$Efficiency_Score, 0.75, na.rm = TRUE), na.rm = TRUE), "facilities\n")
+  })
+  
+  # Recommendations
+  output$recommendations <- renderUI({
+    req(analysis_data())
+    data <- analysis_data()
+    
+    high_priority_count <- sum(data$Review_Priority == "High", na.rm = TRUE)
+    unique_pattern_count <- sum(data$Pattern_Flag == "Unique Pattern", na.rm = TRUE)
+    
+    recommendations <- tags$div(
+      tags$h5("Strategic Recommendations:", style = "color: #28a745; margin-bottom: 15px;"),
+      
+      if (high_priority_count > 0) {
+        tags$div(
+          tags$strong("1. Excellence Review Initiative"), br(),
+          sprintf("Conduct detailed operational reviews for %d high-priority facilities. ", high_priority_count),
+          "Focus on identifying best practices and improvement opportunities.", br(), br()
+        )
+      },
+      
+      if (unique_pattern_count > 0) {
+        tags$div(
+          tags$strong("2. Pattern Analysis Program"), br(),
+          sprintf("Analyze the %d facilities with unique operational patterns. ", unique_pattern_count),
+          "These may represent innovative practices worth studying or areas needing support.", br(), br()
+        )
+      },
+      
+      tags$div(
+        tags$strong("3. Continuous Improvement Framework"), br(),
+        "Implement regular assessment cycles to track improvement trends and maintain high standards across all facilities.", br(), br()
+      ),
+      
+      tags$div(
+        tags$strong("4. Knowledge Sharing Network"), br(),
+        "Establish peer learning opportunities between high-performing and developing facilities to accelerate system-wide improvements.", br(), br()
+      ),
+      
+      tags$div(
+        tags$strong("5. Performance Monitoring Dashboard"), br(),
+        "Deploy real-time monitoring tools to proactively identify and address operational variations before they impact patient care."
+      )
+    )
+    
+    return(recommendations)
+  })
+  
+  # Interactive DBSCAN plot
+  output$dbscanPlot <- renderPlotly({
+    req(analysis_data())
+    data <- analysis_data()
+    
+    p <- ggplot(data, aes(x = Estimated_LOS, y = Predicted_LOS, 
+                         color = Pattern_Flag, text = paste(
+                           "Facility:", ifelse(exists("Facility_Name", data), Facility_Name, Facility_ID),
+                           "<br>Estimated LOS:", round(Estimated_LOS, 2),
+                           "<br>Predicted LOS:", round(Predicted_LOS, 2),
+                           "<br>Pattern:", Pattern_Flag,
+                           "<br>Priority:", Review_Priority
+                         ))) +
+      geom_point(alpha = 0.7, size = 2) +
+      scale_color_manual(values = c("Unique Pattern" = "#e74c3c", "Standard Pattern" = "#3498db")) +
+      labs(title = "Operational Pattern Analysis",
+           subtitle = "Length of Stay: Estimated vs Predicted",
+           x = "Estimated Length of Stay (days)",
+           y = "Predicted Length of Stay (days)",
+           color = "Operational Pattern") +
+      theme_minimal() +
+      theme(plot.title = element_text(size = 16, face = "bold"),
+            plot.subtitle = element_text(size = 12, color = "#7f8c8d"))
+    
+    ggplotly(p, tooltip = "text") %>%
+      layout(hoverlabel = list(bgcolor = "white", font = list(size = 10)))
+  })
+  
+  # Interactive histogram
+  output$iforestHist <- renderPlotly({
+    req(analysis_data())
+    data <- analysis_data()
+    
+    threshold_val <- quantile(data$Efficiency_Score, input$iforest_cut, na.rm = TRUE)
+    
+    p <- ggplot(data, aes(x = Efficiency_Score)) +
+      geom_histogram(bins = 30, fill = "#3498db", alpha = 0.7, color = "white") +
+      geom_vline(xintercept = threshold_val, color = "#e74c3c", linetype = "dashed", size = 1) +
+      annotate("text", x = threshold_val + 0.05, y = Inf, 
+               label = "Review Threshold", vjust = 1.2, color = "#e74c3c", size = 3) +
+      labs(title = "Operational Efficiency Score Distribution",
+           subtitle = "Higher scores indicate unique operational characteristics",
+           x = "Efficiency Score",
+           y = "Number of Facilities") +
+      theme_minimal() +
+      theme(plot.title = element_text(size = 14, face = "bold"))
+    
+    ggplotly(p)
+  })
+  
+  # Correlation plot
+  output$correlationPlot <- renderPlotly({
+    req(analysis_data())
+    data <- analysis_data()
+    
+    p <- ggplot(data, aes(x = LOS_MachineLearningResidual, y = LOS_VariabilityDeviation,
+                         color = Review_Priority, text = paste(
+                           "Facility:", ifelse(exists("Facility_Name", data), Facility_Name, Facility_ID),
+                           "<br>ML Residual:", round(LOS_MachineLearningResidual, 3),
+                           "<br>Variability Dev:", round(LOS_VariabilityDeviation, 3),
+                           "<br>Priority:", Review_Priority
+                         ))) +
+      geom_point(alpha = 0.6, size = 2) +
+      scale_color_manual(values = c("High" = "#e74c3c", "Standard" = "#27ae60")) +
+      labs(title = "Performance Metrics Correlation",
+           subtitle = "Machine Learning Residuals vs Variability Deviations",
+           x = "ML Prediction Residual",
+           y = "LOS Variability Deviation",
+           color = "Review Priority") +
+      theme_minimal() +
+      theme(plot.title = element_text(size = 14, face = "bold"))
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  # Enhanced data table
+  output$dataTable <- renderDT({
+    req(analysis_data())
+    data <- analysis_data()
+    
+    # Select and rename columns for display
+    display_data <- data[, c("Facility_ID", "Estimated_LOS", "Predicted_LOS", 
+                           "LOS_MachineLearningResidual", "LOS_VariabilityDeviation",
+                           "Pattern_Flag", "Review_Priority", "Assessment_Notes")]
+    
+    # Round numeric columns
+    numeric_cols <- c("Estimated_LOS", "Predicted_LOS", "LOS_MachineLearningResidual", "LOS_VariabilityDeviation")
+    display_data[numeric_cols] <- lapply(display_data[numeric_cols], function(x) round(x, 3))
+    
+    # Rename columns for better display
+    colnames(display_data) <- c("Facility ID", "Estimated LOS", "Predicted LOS", 
+                              "ML Residual", "Variability Dev", "Pattern Type", 
+                              "Review Priority", "Assessment Notes")
+    
+    datatable(
+      display_data,
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        dom = 'Bfrtip',
+        buttons = c('copy', 'csv', 'excel'),
+        columnDefs = list(
+          list(className = 'dt-center', targets = c(1, 2, 3, 4)),
+          list(width = '200px', targets = 7)
+        )
+      ),
+      class = 'cell-border stripe hover',
+      rownames = FALSE
+    ) %>%
+      formatStyle(
+        "Review Priority",
+        backgroundColor = styleEqual("High", "#fff3cd"),
+        color = styleEqual("High", "#856404")
+      ) %>%
+      formatStyle(
+        "Pattern Type",
+        backgroundColor = styleEqual("Unique Pattern", "#f8d7da"),
+        color = styleEqual("Unique Pattern", "#721c24")
+      )
+  })
+  
+  # Download handler
+  output$download <- downloadHandler(
+    filename = function() {
+      paste0("Hospital_Quality_Assessment_", Sys.Date(), ".csv")
+    },
+    content = function(file) {
+      req(analysis_data())
+      write.csv(analysis_data(), file, row.names = FALSE)
+    }
+  )
+}
+
+shinyApp(ui, server)
