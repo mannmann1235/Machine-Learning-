@@ -1,0 +1,114 @@
+library(shiny)
+library(shinydashboard)
+library(plotly)
+library(DT)
+library(dplyr)
+
+ui <- dashboardPage(
+  dashboardHeader(title = "TripData Report"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Overview", tabName = "overview", icon = icon("dashboard")),
+      menuItem("Trip Analysis", tabName = "analysis", icon = icon("chart-line")),
+      menuItem("Anomalies", tabName = "anomalies", icon = icon("exclamation-triangle")),
+      menuItem("Raw Data", tabName = "raw", icon = icon("table"))
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      # --- Overview ---
+      tabItem(tabName = "overview",
+              fluidRow(
+                valueBoxOutput("totalTrips"),
+                valueBoxOutput("avgDuration"),
+                valueBoxOutput("avgDistance"),
+                valueBoxOutput("avgFuelEff")
+              ),
+              fluidRow(
+                box(width = 6, plotlyOutput("distPlot")),
+                box(width = 6, plotlyOutput("durationPlot"))
+              )
+      ),
+      
+      # --- Trip Analysis ---
+      tabItem(tabName = "analysis",
+              fluidRow(
+                box(width = 6, plotlyOutput("fuelPlot")),
+                box(width = 6, plotlyOutput("efficiencyBoxplot"))
+              )
+      ),
+      
+      # --- Anomalies ---
+      tabItem(tabName = "anomalies",
+              fluidRow(
+                box(width = 12, DTOutput("anomalyTable"))
+              )
+      ),
+      
+      # --- Raw Data ---
+      tabItem(tabName = "raw",
+              fluidRow(
+                box(width = 12, DTOutput("rawTable"))
+              )
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  # KPIs
+  output$totalTrips <- renderValueBox({
+    valueBox(nrow(TripData), "Total Trips", icon = icon("truck"), color = "blue")
+  })
+  
+  output$avgDuration <- renderValueBox({
+    valueBox(round(mean(TripData$DurationMinutes, na.rm = TRUE), 1),
+             "Avg Duration (min)", icon = icon("clock"), color = "green")
+  })
+  
+  output$avgDistance <- renderValueBox({
+    valueBox(round(mean(TripData$TRANSPORTATION_DISTANCE_IN_KM, na.rm = TRUE), 1),
+             "Avg Distance (km)", icon = icon("road"), color = "purple")
+  })
+  
+  output$avgFuelEff <- renderValueBox({
+    valueBox(round(mean(TripData$FuelEfficiency, na.rm = TRUE), 1),
+             "Avg Fuel Efficiency", icon = icon("gas-pump"), color = "orange")
+  })
+  
+  # Plots
+  output$distPlot <- renderPlotly({
+    plot_ly(TripData, x = ~TRANSPORTATION_DISTANCE_IN_KM, type = "histogram") %>%
+      layout(title = "Distribution of Trip Distances")
+  })
+  
+  output$durationPlot <- renderPlotly({
+    plot_ly(TripData, x = ~DurationMinutes, type = "histogram") %>%
+      layout(title = "Distribution of Trip Durations")
+  })
+  
+  output$fuelPlot <- renderPlotly({
+    plot_ly(TripData, x = ~TRANSPORTATION_DISTANCE_IN_KM, y = ~FuelConsumption,
+            type = "scatter", mode = "markers", color = ~Anomalies) %>%
+      layout(title = "Fuel Consumption vs Distance")
+  })
+  
+  output$efficiencyBoxplot <- renderPlotly({
+    plot_ly(TripData, y = ~FuelEfficiency, type = "box", color = ~vehicleType) %>%
+      layout(title = "Fuel Efficiency by Vehicle Type")
+  })
+  
+  # Tables
+  output$anomalyTable <- renderDT({
+    TripData %>%
+      filter(Anomalies == 1 | Potential_Theft == 1) %>%
+      datatable(options = list(pageLength = 10, scrollX = TRUE))
+  })
+  
+  output$rawTable <- renderDT({
+    datatable(TripData, options = list(pageLength = 15, scrollX = TRUE))
+  })
+}
+
+shinyApp(ui, server)
